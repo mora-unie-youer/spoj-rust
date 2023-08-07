@@ -333,11 +333,15 @@ impl Mul for &BigNum {
     type Output = BigNum;
 
     fn mul(self, rhs: Self) -> Self::Output {
-        let n_orig = self.len() + rhs.len();
+        const CHUNK_SIZE: usize = 6;
+        const CHUNK_BASE: usize = 10usize.pow(CHUNK_SIZE as u32);
+
+        let mut a = self.digits_to_complex(CHUNK_SIZE);
+        let mut b = rhs.digits_to_complex(CHUNK_SIZE);
+
+        let n_orig = a.len() + b.len();
         let n = n_orig.next_power_of_two();
 
-        let mut a = self.digits_to_complex();
-        let mut b = rhs.digits_to_complex();
         a.resize(n, Default::default());
         b.resize(n, Default::default());
 
@@ -346,27 +350,47 @@ impl Mul for &BigNum {
 
         let result: Vec<_> = a.into_iter().zip(b).map(|(a, b)| a * b).collect();
         let result = ifft(&result);
-        let chunks: Vec<_> = result
+
+        let mut chunks: Vec<_> = result
             .into_iter()
             .map(|x| x.real.round() as usize)
             .collect();
-
-        let mut digits = Vec::with_capacity(n_orig);
-        let mut carry = 0;
-        for chunk in chunks {
-            let value = chunk + carry;
-            digits.push(value % 10);
-            carry = value / 10;
+        while chunks.len() > 1 && chunks.last() == Some(&0) {
+            chunks.pop();
         }
 
-        while carry > 0 {
-            digits.push(carry % 10);
-            carry /= 10;
+        let mut length = chunks.len();
+        let mut i = 0;
+        while i < length {
+            if chunks[i] >= CHUNK_BASE {
+                let carry = chunks[i] / CHUNK_BASE;
+
+                if i == length - 1 {
+                    chunks.push(carry);
+                    length += 1;
+                } else {
+                    chunks[i + 1] += carry;
+                }
+
+                chunks[i] %= CHUNK_BASE;
+            }
+
+            i += 1;
         }
 
-        // Reduce
-        while digits.len() > 1 && digits.last() == Some(&0) {
-            digits.pop();
+        let mut digits = vec![];
+        for (i, mut chunk) in chunks.into_iter().enumerate() {
+            if i < length - 1 {
+                for _ in 0..CHUNK_SIZE {
+                    digits.push(chunk % 10);
+                    chunk /= 10;
+                }
+            } else {
+                while chunk > 0 {
+                    digits.push(chunk % 10);
+                    chunk /= 10;
+                }
+            }
         }
 
         Self::Output { digits }
@@ -483,60 +507,53 @@ impl BigNum {
         self.digits.len()
     }
 
-    fn digits_to_complex(&self) -> Vec<Complex> {
-        self.digits
-            .iter()
-            .map(|&x| Complex::new(x as f64, 0.))
-            .collect()
+    fn digits_to_complex(&self, chunk_size: usize) -> Vec<Complex> {
+        let mut chunks = Vec::with_capacity((self.len() + chunk_size - 1) / chunk_size);
+        let mut i = 0;
+        while i < self.len() {
+            let mut chunk = 0;
+            let max_length = chunk_size.min(self.len() - i);
+
+            for j in (0..max_length).rev() {
+                if i + j >= self.len() {
+                    break;
+                }
+
+                chunk = chunk * 10 + self.digits[i + j];
+            }
+
+            chunks.push(Complex::new(chunk as f64, 0.));
+            i += chunk_size;
+        }
+
+        chunks
     }
 
     fn sqrt(&self) -> Self {
-        let guess = {
-            let d = (self.len() + 1) / 2;
-
-            let mut guess2 = vec![0; d];
-            guess2[d - 1] = 2;
-            let mut guess7 = vec![0; d];
-            guess7[d - 1] = 7;
-
-            let guess2 = BigNum { digits: guess2 };
-            let guess7 = BigNum { digits: guess7 };
-
-            let square2 = &guess2 * &guess2;
-            let square7 = &guess7 * &guess7;
-
-            if &square7 < self {
-                BigNum { digits: vec![9; d] }
-            } else if &square2 < self {
-                guess7
-            } else {
-                guess2
-            }
-        };
-
-        // Doing one iteration of Babylonian algorithm
-        let guess = (self / &guess + guess) / 2;
-        // let guess = (self / &guess + guess) / 2;
-        // let guess = (self / &guess + guess) / 2;
-
         // Then searching with binary search
         let mut lo = BigNum::from(0);
-        let mut hi = guess;
+        let mut hi = BigNum {
+            digits: vec![9; (self.len() + 1) / 2],
+        };
 
         while lo <= hi {
             let mid = (&lo + &hi) / 2;
-            let next = &mid + 1;
 
             let sq1 = &mid * &mid;
-            let sq2 = &next * &next;
-            if &sq1 <= self && &sq2 > self {
-                return mid;
-            } else {
-                match sq1.cmp(self) {
-                    Ordering::Less => lo = mid + 1,
-                    Ordering::Greater => hi = mid,
-                    _ => unreachable!(),
+            let sq1_ord = sq1.cmp(self);
+
+            if sq1_ord.is_le() {
+                let next = &mid + 1;
+                let sq2 = &next * &next;
+                if &sq2 > self {
+                    return mid;
                 }
+            }
+
+            match sq1_ord {
+                Ordering::Less => lo = mid + 1,
+                Ordering::Greater => hi = mid,
+                _ => unreachable!(),
             }
         }
 
