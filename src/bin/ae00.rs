@@ -27,10 +27,13 @@ fn main() {
     let mut lines = stdin.lock().lines();
 
     let n: usize = lines.next().unwrap().unwrap().parse().unwrap();
+
+    let mut i = 1;
     let mut answer = 0;
-    for i in 1..=n {
+    while i * i <= n {
         let j = n / i;
         answer += j.saturating_sub(i - 1);
+        i += 1;
     }
 
     println!("{}", answer);
